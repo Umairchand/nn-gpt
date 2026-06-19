@@ -130,6 +130,7 @@ class CIFARRewardEvaluator:
         return None
 
     def _heuristic_score(self, code):
+        """Heuristic code quality score when real evaluation fails."""
         if not code or len(code) < 50: return 0.0
         s, cl = 0.0, code.lower()
         if 'class' in cl and 'nn.module' in cl: s += 0.15
@@ -163,7 +164,7 @@ class CIFARRewardEvaluator:
         try:
             exec(code, namespace)
         except Exception as e:
-            return self._heuristic_score(code) * 0.5, "heuristic_fallback"
+            return 0.0, f"exec_failed: {str(e)[:60]}"
 
         if "Net" not in namespace:
             return 0.0, "no_Net_after_exec"
@@ -454,10 +455,10 @@ def load_prompts(tokenizer, limit=200):
         ds = str(row.get('dataset', 'cifar-10'))
         ep = int(row.get('epoch', 1) or 1)
         text = (f"You are a machine learning model designer.\n"
-                f"Generate a simple PyTorch CNN class Net(nn.Module) with no constructor arguments that achieves "
+                f"Generate a PyTorch neural network class Net(nn.Module) that achieves "
                 f"at least {acc:.4f} accuracy at epoch {ep} on '{ds}' for img-classification.\n"
                 f"Input: 3x32x32 images. Output: 10 classes.\n"
-                f"The class __init__(self) must take NO arguments except self. Use hardcoded values for channels. Respond only with code inside <nn> tags.")
+                f"Respond only with the Python class code inside <nn> tags.")
         try:
             fmt = tokenizer.apply_chat_template(
                 [{"role": "user", "content": text}],
