@@ -40,7 +40,7 @@ LEARNING_RATE = 5e-5
 LORA_R = 16
 LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
-NN_TRAIN_EPOCHS = 2          # Epochs to train each generated CV model on CIFAR-10
+NN_TRAIN_EPOCHS = 5          # Epochs to train each generated CV model on CIFAR-10
 
 
 # ══════════════════════════════════════════════════════
@@ -101,10 +101,42 @@ class CIFARRewardEvaluator:
                 header = ("import torch\nimport torch.nn as nn\n"
                           "import torch.nn.functional as F\n"
                           "import math\nfrom collections import OrderedDict\n\n")
-                # Patch LEMUR-format __init__ to add default values
+                # Patch ANY __init__ with args to add defaults + **kwargs
+                def patch_init(match):
+                    """Add default values to all constructor parameters."""
+                    params = match.group(1)
+                    defaults = {
+                        "in_shape": "(1,3,32,32)", "out_shape": "10",
+                        "in_channels": "3", "out_channels": "10",
+                        "num_classes": "10", "n_classes": "10",
+                        "prm": "None", "device": '"cuda"',
+                        "dropout_prob": "0.3", "drop_prob": "0.3",
+                        "loc_drop_prob": "0.3", "loc_dropout_prob": "0.3",
+                        "dropout": "0.3", "num_columns": "4",
+                        "hidden_dim": "128", "hidden_size": "128",
+                        "num_layers": "4", "num_heads": "4",
+                        "num_blocks": "4", "channels": "64",
+                        "img_size": "32", "embed_dim": "128",
+                        "model": "None", "backbone": "None",
+                    }
+                    new_params = []
+                    for p in params.split(","):
+                        p = p.strip()
+                        if not p or p == "self":
+                            continue
+                        # Remove type annotations
+                        name = p.split(":")[0].split("=")[0].strip()
+                        if "=" in p:
+                            new_params.append(p.strip())
+                        elif name in defaults:
+                            new_params.append(f"{name}={defaults[name]}")
+                        else:
+                            new_params.append(f"{name}=None")
+                    result = "def __init__(self, " + ", ".join(new_params) + ", **kwargs)"
+                    return result
                 code = re.sub(
-                    r'def __init__\(self,\s*in_shape[^)]*\)',
-                    'def __init__(self, in_shape=(1,3,32,32), out_shape=10, prm=None, device="cuda")',
+                    r'def __init__\(self,([^)]+)\)',
+                    patch_init,
                     code
                 )
                 # Remove broken attribute-only lines (e.g. self._something_undefined)
@@ -245,13 +277,26 @@ class CIFARRewardEvaluator:
             score = self._heuristic_score(code)
             return score * 0.5 - 0.5, f"instantiation_failed({score:.2f})"
 
-        # Shape test
+        # Shape test — auto-fix models that forget to flatten/pool
         try:
             test_in = torch.randn(2, 3, 32, 32).cuda()
             test_out = net(test_in)
+            if test_out.dim() > 2:
+                # Model outputs (batch, classes, H, W) — wrap with global avg pool
+                original_forward = net.forward
+                pool = nn.AdaptiveAvgPool2d(1).cuda()
+                def fixed_forward(x, _orig=original_forward, _pool=pool):
+                    out = _orig(x)
+                    if out.dim() > 2:
+                        out = _pool(out).flatten(1)
+                    return out
+                net.forward = fixed_forward
+                test_out = net(test_in)
+            if test_out.dim() == 1:
+                test_out = test_out.unsqueeze(0)
             if test_out.shape[-1] != 10:
                 del net; torch.cuda.empty_cache()
-                return 0.0, f"wrong_output_shape_{test_out.shape}"
+                return -0.1, f"wrong_output_shape_{test_out.shape}"
         except Exception as e:
             del net; torch.cuda.empty_cache()
             return 0.0, f"shape_test_failed: {str(e)[:60]}"
